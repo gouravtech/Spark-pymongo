@@ -1,0 +1,150 @@
+import json
+from pprint import pprint
+import unicodedata
+
+from pyspark import SparkConf, SparkContext
+conf = (SparkConf()
+         .setMaster("local")
+         .setAppName("clive")
+         .set("spark.executor.memory", "3g"))
+sc = SparkContext(conf = conf)
+
+config2 = {"mongo.input.uri": "mongodb://localhost:27017/clive_test.linkedin_all"}
+inputFormatClassName = "com.mongodb.hadoop.MongoInputFormat"
+
+keyClassName = "org.apache.hadoop.io.Text"
+valueClassName = "org.apache.hadoop.io.MapWritable"
+
+def fiterByCurrentPosition(data):
+    listdesgination = ['svp','vp','cto','manager','cio','ceo','cco','cfo','cso','cxo','cheif']
+    try:
+        if data["current_experience"] == 'na':
+                return False
+        currentdesignation = data["current_experience"]["position"]
+        if currentdesignation == 'na' or currentdesignation == None :
+            return False
+        currentdesignation = currentdesignation.lower()
+        if any(x in currentdesignation for x in listdesgination):
+            return True
+        else:
+            return False
+    except Exception as ex :
+            print 'Got an exception',ex
+
+
+def getJobMonths(totalmonthsstring,result,type):
+    totalmonthslist = totalmonthsstring.split('(',1)
+    result_key = str(type)+'jobduration'
+    for dur in totalmonthslist:
+        if dur.__contains__(")"):
+            listdur = dur.split(")",1)
+            unicodeactualduration=listdur[0]
+            stringactualduration = unicodedata.normalize('NFKD', unicodeactualduration).encode('ascii','ignore')
+            listactualduration=stringactualduration.split(' ')
+            totalmonths = 0
+            if (listactualduration.__len__() == 4):
+                if 'less than a year' in totalmonthsstring:
+                    result[result_key] = 'less than a year'
+                    return result
+                stringyears = listactualduration[0]
+                stringmonths = listactualduration[2]
+                if stringyears.isdigit() and stringmonths.isdigit():
+                    totalmonths = int(stringyears) * 12
+                    totalmonths = totalmonths + int(stringmonths)
+                    result[result_key] = totalmonths
+                return result
+            elif (listactualduration.__len__() == 2):
+                if 'month' in listactualduration or  'months' in listactualduration or 'mes' in listactualduration:
+                    totalmonths = listactualduration[0]
+                else :
+                    stringyears = listactualduration[0]
+                    totalmonths = int(stringyears) * 12
+                result[result_key] = totalmonths
+                return result
+            else:
+                pass
+
+
+def getFirstJobDetails(data,result):
+    listjobs = data["previous_experiences"]
+    if listjobs == 'na' or len(listjobs)<=0 or listjobs == None:
+        result["firstjobdesignation"] = 'NA'
+        result["firstjobduration"] = 0
+        return
+    firstjobdesignation = data["previous_experiences"][listjobs.__len__()-1]["Previous_Experience"+str(listjobs.__len__())]["position"]
+    result["firstjobdesignation"] = firstjobdesignation
+    totalmonthsstring = data["previous_experiences"][listjobs.__len__()-1]["Previous_Experience"+str(listjobs.__len__())]["duration"]
+    totalmonthslist = totalmonthsstring.split('(',1)
+    for dur in totalmonthslist:
+        if dur.__contains__(")"):
+            listdur = dur.split(")",1)
+            unicodeactualduration=listdur[0]
+            stringactualduration = unicodedata.normalize('NFKD', unicodeactualduration).encode('ascii','ignore')
+            listactualduration=stringactualduration.split(' ')
+            totalmonths = 0
+            if (listactualduration.__len__() == 4):
+                stringyears = listactualduration[0]
+                if stringyears.isdigit():
+                    totalmonths = int(stringyears) * 12
+                    stringmonths = listactualduration[2]
+                    totalmonths = totalmonths + int(stringmonths)
+                    result["firstjobduration"] = totalmonths
+                else:
+                    result["firstjobduration"] = 'less than a year'
+            elif (listactualduration.__len__() == 2):
+                if 'month' in listactualduration or  'months' in listactualduration or 'mes' in listactualduration:
+                    totalmonths = listactualduration[0]
+                else :
+                    stringyears = listactualduration[0]
+                    totalmonths = int(stringyears) * 12
+                result["firstjobduration"] = totalmonths
+            else:
+                pass
+    return result
+
+
+def getJobDetails(data):
+            result = {}
+            name = data["name"]
+            name =unicodedata.normalize('NFKD',name).encode('ascii','ignore')
+            city = data["city"]
+            city =unicodedata.normalize('NFKD',city).encode('ascii','ignore')
+            result["name"] = name
+            result["city"] =  city
+            if len(data["previous_experiences"])<=0:
+                result["previous_experience"] = 'NA'
+                result["previous_jobduration"] = 0
+            else :
+                previousdesignation = data["previous_experiences"][0]["Previous_Experience1"]["position"]
+                result["previous_experience"] = previousdesignation
+                totalmonthsstring = data["previous_experiences"][0]["Previous_Experience1"]["duration"]
+                getJobMonths(totalmonthsstring,result,"previous_")
+            if data['current_experience'] == 'na':
+                result["current_designation"] = 'NA'
+                result['current_jobduration'] = 0
+            else:
+                currentdesignation = data["current_experience"]["position"]
+                result["current_designation"] = currentdesignation
+                totalmonthsstring = data["current_experience"]["duration"]
+                if 'menos de un ao'in totalmonthsstring:
+                    result["current_jobduration"] = 'less than a year'
+                else :
+                    getJobMonths(totalmonthsstring,result,"current_")
+            getFirstJobDetails(data,result)
+            return result
+
+
+
+
+all_data2 = sc.newAPIHadoopRDD(inputFormatClassName, keyClassName, valueClassName, None, None, config2)
+data = all_data2.values()
+onlyceo =data.filter(fiterByCurrentPosition)
+prev_job_for_ten = onlyceo.map(getJobDetails)
+all_d = prev_job_for_ten.collect()
+
+import csv
+output = json.dumps(all_d)
+rows = json.loads(output)
+with open('test5.csv', 'wb+') as f:
+    dict_writer = csv.DictWriter(f, fieldnames=['city', 'name','previous_experience', 'current_designation', 'firstjobdesignation', 'current_jobduration', 'firstjobduration', 'previous_jobduration'])
+    dict_writer.writerows(rows)
